@@ -55,6 +55,7 @@ body {
   background: rgba(255, 255, 255, 0.9);
   padding: 0.8rem 0.9rem;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  color: #000!important;
 }
 
 .input:focus {

@@ -34,7 +34,8 @@ export async function PATCH(
 
     // Validate currency code (ISO 4217)
     const validCurrencies = [
-      "USD", "EUR","GBP", "PKR"];
+      "USD", "EUR", "GBP","PKR"
+    ];
 
     if (!validCurrencies.includes(currency.toUpperCase())) {
       return NextResponse.json(

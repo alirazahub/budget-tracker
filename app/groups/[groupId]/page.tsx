@@ -38,12 +38,12 @@ type Expense = {
   type: string;
 };
 
-// Supported currencies
+// Supported currencies (must match API)
 const CURRENCIES = [
   { code: "USD", name: "US Dollar ($)" },
   { code: "EUR", name: "Euro (€)" },
   { code: "GBP", name: "British Pound (£)" },
-  { code: "PKR", name: "Pakistani Rupee" },
+  { code: "PKR", name: "Pakistani Rupee (₨)" },
 ];
 
 export default function GroupDetailsPage() {
@@ -70,6 +70,150 @@ export default function GroupDetailsPage() {
   const [saving, setSaving] = useState(false);
   const [selectedCurrency, setSelectedCurrency] = useState("USD");
   const [changingCurrency, setChangingCurrency] = useState(false);
+  const [balances, setBalances] = useState<Record<string, { net: number }>>({});
+
+  function isSameWeek(dateA: Date, dateB: Date) {
+    const a = new Date(dateA);
+    const b = new Date(dateB);
+    const startOfWeek = (d: Date) => {
+      const day = d.getDay();
+      const diff = d.getDate() - day + (day === 0 ? -6 : 1); // Monday start
+      const res = new Date(d);
+      res.setDate(diff);
+      res.setHours(0, 0, 0, 0);
+      return res;
+    };
+    const aStart = startOfWeek(a);
+    const bStart = startOfWeek(b);
+    return aStart.getTime() === bStart.getTime();
+  }
+
+  function isSameMonth(dateA: Date, dateB: Date) {
+    const a = new Date(dateA);
+    const b = new Date(dateB);
+    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
+  }
+
+  function getPeriodTotal(list: Expense[], period: "week" | "month") {
+    const now = new Date();
+    return list.reduce((sum, e) => {
+      const d = new Date(e.date);
+      const match = period === "week" ? isSameWeek(d, now) : isSameMonth(d, now);
+      return match ? sum + (Number(e.amount) || 0) : sum;
+    }, 0);
+  }
+
+  function computeBalances(list: Expense[], members: GroupMember[]) {
+    const map: Record<string, { net: number }> = {};
+    const ensure = (id: string) => {
+      if (!map[id]) map[id] = { net: 0 };
+      return id;
+    };
+    const resolveId = (userId?: string, name?: string) => {
+      const memberMatch = name ? members.find((m) => m.name === name) : undefined;
+      if (memberMatch) return ensure(memberMatch._id);
+      if (userId) return ensure(userId);
+      return null;
+    };
+
+    members.forEach((m) => ensure(m._id));
+
+    list.forEach((e) => {
+      const payerId = resolveId(e.paidByUserId, e.paidBy);
+      const involvedIds = e.involved
+        .map((inv) => resolveId(inv.userId, inv.name))
+        .filter((id): id is string => Boolean(id));
+
+      const share = involvedIds.length > 0 ? (Number(e.amount) || 0) / involvedIds.length : 0;
+
+      if (payerId) {
+        map[payerId].net += Number(e.amount) || 0;
+      }
+
+      involvedIds.forEach((uid) => {
+        map[uid].net -= share;
+      });
+    });
+    return map;
+  }
+
+  function getOverallOwe(b: Record<string, { net: number }>) {
+    return Object.values(b).reduce((sum, x) => (x.net < 0 ? sum + Math.abs(x.net) : sum), 0);
+  }
+  function getOverallOwedTo(b: Record<string, { net: number }>) {
+    return Object.values(b).reduce((sum, x) => (x.net > 0 ? sum + x.net : sum), 0);
+  }
+
+  const getUserNet = useCallback(
+    (userId: string) => balances[userId]?.net ?? 0,
+    [balances]
+  );
+
+  function computeUserSettlements(
+    b: Record<string, { net: number }>,
+    userId: string,
+    members: GroupMember[]
+  ) {
+    const userNet = b[userId]?.net ?? 0;
+    if (userNet === 0) return [];
+
+    const creditors = Object.entries(b)
+      .filter(([id, v]) => id !== userId && v.net > 0)
+      .map(([id, v]) => ({ id, amount: v.net }));
+    const debtors = Object.entries(b)
+      .filter(([id, v]) => id !== userId && v.net < 0)
+      .map(([id, v]) => ({ id, amount: Math.abs(v.net) }));
+
+    const settlements: Array<{ counterpartyId: string; amount: number; direction: "owes" | "owed" }> = [];
+
+    if (userNet < 0) {
+      let remaining = Math.abs(userNet);
+      for (const c of creditors) {
+        if (remaining <= 0) break;
+        const pay = Math.min(remaining, c.amount);
+        if (pay > 0) {
+          settlements.push({ counterpartyId: c.id, amount: pay, direction: "owes" });
+          remaining -= pay;
+        }
+      }
+    } else if (userNet > 0) {
+      let remaining = userNet;
+      for (const d of debtors) {
+        if (remaining <= 0) break;
+        const receive = Math.min(remaining, d.amount);
+        if (receive > 0) {
+          settlements.push({ counterpartyId: d.id, amount: receive, direction: "owed" });
+          remaining -= receive;
+        }
+      }
+    }
+
+    // Filter to only members present
+    const memberIds = new Set(members.map((m) => m._id));
+    return settlements.filter((s) => memberIds.has(s.counterpartyId));
+  }
+
+  function getUserExpenseDelta(expense: Expense, currentUserId: string, members: GroupMember[]) {
+    const memberIdByName = members.find((m) => m.name === user?.name)?._id;
+    const userKeys = [currentUserId, memberIdByName].filter(Boolean) as string[];
+
+    const involvedIds = expense.involved
+      .map((inv) => inv.userId || members.find((m) => m.name === inv.name)?._id)
+      .filter((id): id is string => Boolean(id));
+    const share = involvedIds.length > 0 ? (Number(expense.amount) || 0) / involvedIds.length : 0;
+
+    const userInvolved = involvedIds.some((id) => userKeys.includes(id));
+    const isPayer = userKeys.includes(expense.paidByUserId) || (user?.name && expense.paidBy === user.name);
+
+    if (isPayer) {
+      const selfShare = userInvolved ? share : 0;
+      return (Number(expense.amount) || 0) - selfShare;
+    }
+    if (userInvolved) {
+      return -share;
+    }
+    return 0;
+  }
 
   // Auth check
   useEffect(() => {
@@ -119,6 +263,9 @@ export default function GroupDetailsPage() {
       const data = await response.json();
       if (response.ok) {
         setExpenses(data.expenses || []);
+        if (group) {
+          setBalances(computeBalances(data.expenses || [], group.members));
+        }
       }
     } catch (err) {
       console.error("Failed to fetch expenses:", err);
@@ -130,6 +277,13 @@ export default function GroupDetailsPage() {
     fetchGroup();
     fetchExpenses();
   }, [authChecked, fetchGroup, fetchExpenses]);
+
+  // Recompute balances when group or expenses change
+  useEffect(() => {
+    if (group) {
+      setBalances(computeBalances(expenses, group.members));
+    }
+  }, [group, expenses]);
 
   async function handleAddExpense(e: React.FormEvent) {
     e.preventDefault();
@@ -283,24 +437,73 @@ export default function GroupDetailsPage() {
           </div>
         )}
 
-        {/* Stats */}
-        <div className="mb-8 grid grid-cols-1 sm:grid-cols-3 gap-4">
+        {/* Spending & Balances */}
+        <div className="mb-8 grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="card p-6">
-            <p className="text-sm text-slate-600 font-semibold uppercase">Total Spent</p>
+            <p className="text-sm text-slate-600 font-semibold uppercase">Current Week Spent</p>
             <p className="text-3xl font-bold text-slate-900 mt-2">
-              {new Intl.NumberFormat("en-US", {
-                style: "currency",
-                currency: group.currency || "USD",
-              }).format(totalSpent)}
+              {new Intl.NumberFormat("en-US", { style: "currency", currency: group.currency || "USD" }).format(getPeriodTotal(expenses, "week"))}
+            </p>
+            <p className="text-sm text-slate-600 mt-2">Current Month Spent</p>
+            <p className="text-xl font-semibold text-slate-900">
+              {new Intl.NumberFormat("en-US", { style: "currency", currency: group.currency || "USD" }).format(getPeriodTotal(expenses, "month"))}
             </p>
           </div>
           <div className="card p-6">
-            <p className="text-sm text-slate-600 font-semibold uppercase">Expenses</p>
-            <p className="text-3xl font-bold text-slate-900 mt-2">{expenses.length}</p>
+            <p className="text-sm text-slate-600 font-semibold uppercase">Your Balance</p>
+            {(() => {
+              const net = getUserNet(user.id);
+              const formatted = new Intl.NumberFormat("en-US", { style: "currency", currency: group.currency || "USD" }).format(Math.abs(net));
+              const status = net < 0 ? "You owe" : net > 0 ? "You are owed" : "You are settled";
+              const color = net < 0 ? "text-rose-700" : net > 0 ? "text-emerald-700" : "text-slate-700";
+              return (
+                <div className="mt-2">
+                  <p className="text-xs text-slate-500">Current user</p>
+                  <p className={`text-2xl font-bold ${color}`}>
+                    {status} {net === 0 ? "" : formatted}
+                  </p>
+                </div>
+              );
+            })()}
+            <div className="mt-4 flex justify-between text-sm text-slate-600">
+              <div>
+                <p className="uppercase font-semibold">Total Owe</p>
+                <p className="font-semibold text-rose-700">
+                  {new Intl.NumberFormat("en-US", { style: "currency", currency: group.currency || "USD" }).format(getOverallOwe(balances))}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="uppercase font-semibold">Total Owed</p>
+                <p className="font-semibold text-emerald-700">
+                  {new Intl.NumberFormat("en-US", { style: "currency", currency: group.currency || "USD" }).format(getOverallOwedTo(balances))}
+                </p>
+              </div>
+            </div>
           </div>
-          <div className="card p-6">
-            <p className="text-sm text-slate-600 font-semibold uppercase">Members</p>
-            <p className="text-3xl font-bold text-slate-900 mt-2">{group.members.length}</p>
+        </div>
+
+        {/* Member-wise balances relative to you */}
+        <div className="mb-8">
+          <h2 className="text-xl font-bold text-slate-900 mb-4">Member Balances</h2>
+          <div className="space-y-2">
+            {computeUserSettlements(balances, user.id, group.members).map((s) => {
+              const member = group.members.find((m) => m._id === s.counterpartyId);
+              if (!member) return null;
+              const formatted = new Intl.NumberFormat("en-US", { style: "currency", currency: group.currency || "USD" }).format(s.amount);
+              const isOwe = s.direction === "owes";
+              return (
+                <div key={member._id} className="card p-4 flex justify-between items-center">
+                  <div className="flex-1">
+                    <p className="font-semibold text-slate-900">{member.name}</p>
+                    <p className="text-xs text-slate-500">{isOwe ? "You owe" : "Owes you"}</p>
+                  </div>
+                  <p className={`font-bold ${isOwe ? "text-rose-700" : "text-emerald-700"}`}>{formatted}</p>
+                </div>
+              );
+            })}
+            {computeUserSettlements(balances, user.id, group.members).length === 0 && (
+              <div className="card p-4 text-slate-600 text-sm">You're settled with everyone.</div>
+            )}
           </div>
         </div>
 
@@ -472,13 +675,30 @@ export default function GroupDetailsPage() {
                       {new Date(expense.date).toLocaleDateString()} • {expense.type} • Paid by{" "}
                       {expense.paidBy}
                     </p>
+                    <p className="text-xs text-slate-400">
+                      Involved: {expense.involved.map((inv) => inv.name).join(", ")}
+                    </p>
+                    <p className="text-xs text-slate-400">Total: {new Intl.NumberFormat("en-US", { style: "currency", currency: group.currency || "USD" }).format(expense.amount)}</p>
                   </div>
-                  <p className="font-bold text-slate-900">
-                    {new Intl.NumberFormat("en-US", {
-                      style: "currency",
-                      currency: group.currency || "USD",
-                    }).format(expense.amount)}
-                  </p>
+                  {(() => {
+                    const delta = getUserExpenseDelta(expense, user.id, group.members);
+                    if (delta === 0) {
+                      return (
+                        <p className="font-semibold text-slate-700">
+                          {new Intl.NumberFormat("en-US", { style: "currency", currency: group.currency || "USD" }).format(0)}
+                        </p>
+                      );
+                    }
+                    const formatted = new Intl.NumberFormat("en-US", { style: "currency", currency: group.currency || "USD" }).format(Math.abs(delta));
+                    const isOwe = delta < 0;
+                    return (
+                      <div className="text-right">
+                        <p className={`font-bold ${isOwe ? "text-rose-700" : "text-emerald-700"}`}>
+                          {isOwe ? "You owe" : "You get"} {formatted}
+                        </p>
+                      </div>
+                    );
+                  })()}
                 </div>
               ))}
             </div>
@@ -571,6 +791,10 @@ export default function GroupDetailsPage() {
 
                           if (response.ok) {
                             setToast(`Currency updated to ${newCurrency}`);
+                            // Update local group state so UI immediately reflects new currency
+                            setGroup((prev) => prev ? { ...prev, currency: newCurrency } : prev);
+                            // Refetch group to ensure DB persistence and fresh data
+                            await fetchGroup();
                           } else {
                             const data = await response.json();
                             setToast(data.error || "Failed to update currency");
