@@ -16,6 +16,7 @@ export interface GroupDocument extends Document {
   createdByName: string;
   expenseTypes: string[];
   members: GroupMember[];
+  currency: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -43,6 +44,7 @@ const groupSchema = new Schema<GroupDocument>(
     createdByName: { type: String, required: true, trim: true, maxlength: 80 },
     expenseTypes: { type: [String], default: DEFAULT_TYPES },
     members: { type: [memberSchema], default: [] },
+    currency: { type: String, default: "USD" },
   },
   {
     timestamps: true,

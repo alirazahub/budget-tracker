@@ -23,6 +23,7 @@ type Group = {
   createdById: string;
   members: GroupMember[];
   expenseTypes: string[];
+  currency: string;
 };
 
 type Expense = {
@@ -37,10 +38,13 @@ type Expense = {
   type: string;
 };
 
-const currency = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-});
+// Supported currencies
+const CURRENCIES = [
+  { code: "USD", name: "US Dollar ($)" },
+  { code: "EUR", name: "Euro (€)" },
+  { code: "GBP", name: "British Pound (£)" },
+  { code: "PKR", name: "Pakistani Rupee" },
+];
 
 export default function GroupDetailsPage() {
   const router = useRouter();
@@ -64,6 +68,8 @@ export default function GroupDetailsPage() {
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [involved, setInvolved] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
+  const [selectedCurrency, setSelectedCurrency] = useState("USD");
+  const [changingCurrency, setChangingCurrency] = useState(false);
 
   // Auth check
   useEffect(() => {
@@ -94,6 +100,7 @@ export default function GroupDetailsPage() {
       const data = await response.json();
       if (response.ok) {
         setGroup(data.group);
+        setSelectedCurrency(data.group.currency || "USD");
         setType(data.group.expenseTypes[0] || "");
         setPaidBy(data.group.members[0]?.name || "");
         setInvolved(data.group.members.map((m: GroupMember) => m.name));
@@ -280,7 +287,12 @@ export default function GroupDetailsPage() {
         <div className="mb-8 grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="card p-6">
             <p className="text-sm text-slate-600 font-semibold uppercase">Total Spent</p>
-            <p className="text-3xl font-bold text-slate-900 mt-2">{currency.format(totalSpent)}</p>
+            <p className="text-3xl font-bold text-slate-900 mt-2">
+              {new Intl.NumberFormat("en-US", {
+                style: "currency",
+                currency: group.currency || "USD",
+              }).format(totalSpent)}
+            </p>
           </div>
           <div className="card p-6">
             <p className="text-sm text-slate-600 font-semibold uppercase">Expenses</p>
@@ -461,7 +473,12 @@ export default function GroupDetailsPage() {
                       {expense.paidBy}
                     </p>
                   </div>
-                  <p className="font-bold text-slate-900">{currency.format(expense.amount)}</p>
+                  <p className="font-bold text-slate-900">
+                    {new Intl.NumberFormat("en-US", {
+                      style: "currency",
+                      currency: group.currency || "USD",
+                    }).format(expense.amount)}
+                  </p>
                 </div>
               ))}
             </div>
@@ -514,6 +531,68 @@ export default function GroupDetailsPage() {
                 ))}
               </div>
             </div>
+
+            {isAdmin && (
+              <div>
+                <p className="text-sm text-slate-600 font-semibold mb-2">Group Currency</p>
+                <div className="flex items-center gap-2">
+                  <div className="text-sm font-medium text-slate-900 min-w-fit">
+                    {CURRENCIES.find((c) => c.code === selectedCurrency)?.name || selectedCurrency}
+                  </div>
+                  <button
+                    className="muted-btn text-sm"
+                    type="button"
+                    onClick={() => setChangingCurrency(!changingCurrency)}
+                    disabled={changingCurrency}
+                  >
+                    {changingCurrency ? "Changing..." : "Change"}
+                  </button>
+                </div>
+                {changingCurrency && (
+                  <div className="mt-3 p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                    <select
+                      className="input text-sm w-full"
+                      aria-label="Select group currency"
+                      value={selectedCurrency}
+                      onChange={async (e) => {
+                        const newCurrency = e.target.value;
+                        setSelectedCurrency(newCurrency);
+                        setChangingCurrency(false);
+
+                        try {
+                          const response = await fetch(`/api/groups/${groupId}/currency`, {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ 
+                              currency: newCurrency,
+                              userId: user?.id 
+                            }),
+                          });
+
+                          if (response.ok) {
+                            setToast(`Currency updated to ${newCurrency}`);
+                          } else {
+                            const data = await response.json();
+                            setToast(data.error || "Failed to update currency");
+                            setSelectedCurrency(group.currency);
+                          }
+                        } catch (err) {
+                          console.error("Failed to update currency:", err);
+                          setToast("Error updating currency");
+                          setSelectedCurrency(group.currency);
+                        }
+                      }}
+                    >
+                      {CURRENCIES.map((curr) => (
+                        <option key={curr.code} value={curr.code}>
+                          {curr.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
